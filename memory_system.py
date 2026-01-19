@@ -5,8 +5,7 @@ from datetime import datetime
 import os
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-import dashscope
-from dashscope import Generation
+from sentence_transformers import SentenceTransformer
 
 # 导入prompt模块
 from prompt import FACT_EXTRACTION_PROMPT, MEMORY_PROCESSING_PROMPT
@@ -14,12 +13,14 @@ from prompt import FACT_EXTRACTION_PROMPT, MEMORY_PROCESSING_PROMPT
 from util import extract_llm_response_content, parse_json_response, extract_embedding_from_response, call_llm_with_prompt, handle_llm_error
 
 class MemorySystem:
-    def __init__(self, collection_name: str = "memories", llm_model: str = "qwen-turbo", embedding_model: str = "text-embedding-v1"):
+    def __init__(self, collection_name: str = "memories", llm_model: str = "Qwen/Qwen2.5-1.5B-Instruct", embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"):
         """
         初始化记忆系统
         
         Args:
             collection_name: Qdrant集合名称
+            llm_model: LLM模型名称或路径
+            embedding_model: 嵌入模型名称或路径
         """
         self.collection_name = collection_name
         self.llm_model = llm_model
@@ -28,8 +29,8 @@ class MemorySystem:
         # 初始化Qdrant客户端，使用本地文件存储
         self.qdrant_client = QdrantClient(path="./qdrant_data")
         
-        # 设置API密钥
-        dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
+        # 初始化本地嵌入模型
+        self.embedding_model_instance = SentenceTransformer(embedding_model)
         
         # 初始化集合
         self._init_collection()
@@ -40,12 +41,16 @@ class MemorySystem:
         collection_names = [col.name for col in collections.collections]
         
         if self.collection_name not in collection_names:
+            # 获取嵌入维度
+            test_embedding = self.get_embeddings("test")
+            vector_size = len(test_embedding) if test_embedding else 384  # MiniLM-L6-v2 默认维度
+            
             # 创建新集合
             self.qdrant_client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
             )
-            print(f"✅ 创建集合: {self.collection_name}")
+            print(f"✅ 创建集合: {self.collection_name} (向量维度: {vector_size})")
         else:
             print(f"✅ 使用现有集合: {self.collection_name}")
 
@@ -80,13 +85,9 @@ class MemorySystem:
             向量嵌入
         """
         try:
-            # 使用配置的embedding模型
-            response = dashscope.TextEmbedding.call(
-                model=self.embedding_model,
-                input=text
-            )
-            
-            return extract_embedding_from_response(response)
+            # 使用本地嵌入模型
+            embedding = self.embedding_model_instance.encode(text)
+            return embedding.tolist()
         except Exception as e:
             print(f"获取嵌入异常: {e}")
             return []

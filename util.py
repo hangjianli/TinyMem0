@@ -1,7 +1,33 @@
 import json
 import re
 from typing import List, Dict, Optional, Any
-from dashscope import Generation
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+
+# Local Qwen model setup
+MODEL_PATH = "Qwen/Qwen2.5-1.5B-Instruct"  # or your local path - smaller model for testing
+tokenizer = None
+model = None
+generator = None
+
+def load_qwen_model(model_path: str = MODEL_PATH):
+    """Load local Qwen model"""
+    global tokenizer, model, generator
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            dtype=torch.float16,
+            device_map="auto"
+        )
+        generator = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            dtype=torch.float16,
+            device_map="auto"
+        )
+    return generator
 
 
 def extract_llm_response_content(response) -> Optional[str]:
@@ -9,22 +35,30 @@ def extract_llm_response_content(response) -> Optional[str]:
     从LLM响应中提取内容
     
     Args:
-        response: LLM API响应对象
+        response: LLM API响应对象或生成结果
         
     Returns:
         提取的响应内容，如果失败返回None
     """
-    if not response or response.status_code != 200:
+    if not response:
         return None
     
-    # 检查响应结构，兼容不同的返回格式
-    if hasattr(response.output, 'choices') and response.output.choices:
-        return response.output.choices[0].message.content
-    elif hasattr(response.output, 'text'):
-        return response.output.text
-    else:
-        print("无法获取响应内容")
-        return None
+    # Handle different response formats
+    if isinstance(response, list) and len(response) > 0:
+        # Transformers pipeline output
+        return response[0].get('generated_text', '').strip()
+    elif isinstance(response, dict):
+        # Single response dict
+        return response.get('generated_text', '').strip()
+    elif hasattr(response, 'output'):
+        # Dashscope format (backward compatibility)
+        if hasattr(response.output, 'choices') and response.output.choices:
+            return response.output.choices[0].message.content
+        elif hasattr(response.output, 'text'):
+            return response.output.text
+    
+    print("无法获取响应内容")
+    return None
 
 
 def parse_json_response(response_text: str, expected_key: str = None) -> List[Dict]:
@@ -91,10 +125,10 @@ def extract_embedding_from_response(response) -> List[float]:
 
 def call_llm_with_prompt(model: str, system_prompt: str, user_content: str) -> Optional[str]:
     """
-    调用LLM并处理响应
+    调用本地LLM并处理响应
     
     Args:
-        model: 模型名称
+        model: 模型名称或路径
         system_prompt: 系统提示词
         user_content: 用户内容
         
@@ -102,16 +136,31 @@ def call_llm_with_prompt(model: str, system_prompt: str, user_content: str) -> O
         处理后的响应内容
     """
     try:
-        response = Generation.call(
-            model=model,
-            messages=[
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_content}
-            ],
-            result_format='message'
+        # Load the model if not already loaded
+        generator = load_qwen_model(model)
+        
+        # Format messages for Qwen
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+        
+        # Generate response
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
         )
         
-        return extract_llm_response_content(response)
+        response = generator(
+            text,
+            max_new_tokens=2048,
+            temperature=0.7,
+            do_sample=True,
+            return_full_text=False
+        )
+        
+        return response[0]['generated_text'].strip()
     except Exception as e:
         print(f"LLM调用异常: {e}")
         return None
